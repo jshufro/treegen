@@ -63,13 +63,11 @@ func main() {
 			Usage:   "Toggle for saving the files in pretty-print format so they're human readable.",
 			Value:   true,
 		},
-		/*
-			&cli.Uint64Flag{
-				Name:    "target-epoch",
-				Aliases: []string{"t"},
-				Usage:   "If provided without -i, treegen will generate a dry-run tree for this epoch instead of whatever the latest finalized epoch is.",
-			},
-		*/
+		&cli.Uint64Flag{
+			Name:    "target-epoch",
+			Aliases: []string{"t"},
+			Usage:   "If provided, this flag will be used to override the last epoch of an interval, current or past. If passed with -i, the epoch must be part of the provided interval.",
+		},
 		&cli.Uint64Flag{
 			Name:    "ruleset",
 			Aliases: []string{"r"},

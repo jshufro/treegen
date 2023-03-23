@@ -59,6 +59,7 @@ func GenerateTree(c *cli.Context) error {
 
 	// Initialization
 	currentIndex := c.Int64("interval")
+	targetEpoch := c.Uint64("target-epoch")
 	log := log.NewColorLogger(color.FgHiWhite)
 
 	// URL acquisiton
@@ -131,10 +132,10 @@ func GenerateTree(c *cli.Context) error {
 	}
 
 	if currentIndex < 0 {
-		return generator.generateCurrentTree()
+		return generator.generatePartialTree(targetEpoch)
 	}
 
-	return generator.generatePastTree(uint64(currentIndex))
+	return generator.generatePastTree(uint64(currentIndex), targetEpoch)
 }
 
 func (g *treeGenerator) generateRewardsFile(treegen *rprewards.TreeGenerator) (*rprewards.RewardsFile, error) {
@@ -231,10 +232,58 @@ func (g *treeGenerator) writeFiles(rewardsFile *rprewards.RewardsFile, index uin
 	return nil
 }
 
-// Generates a preview / dry run of the tree for the current interval, using the latest finalized state as the endpoint instead of whatever the actual endpoint will end up being
-func (g *treeGenerator) generateCurrentTree() error {
+func (g *treeGenerator) overrideSnapshotDetails(details *snapshotDetails, state *state.NetworkState, targetEpoch uint64) error {
+	// Get the genesis info
+	genesisTime := state.BeaconConfig.GenesisTime
+	genesisEpoch := state.BeaconConfig.GenesisEpoch
+	slotsPerEpoch := state.BeaconConfig.SlotsPerEpoch
+	secondsPerSlot := state.BeaconConfig.SecondsPerSlot
 
-	state, err := g.getState(nil)
+	endBlock := targetEpoch*slotsPerEpoch + slotsPerEpoch - 1
+	endTime := (endBlock-(genesisEpoch*slotsPerEpoch))*secondsPerSlot + genesisTime
+
+	if endTime <= uint64(details.startTime.Unix()) {
+		return fmt.Errorf("targetEpoch %d before current interval %d", targetEpoch, details.index)
+	}
+
+	beaconBlock, found, err := g.bn.GetBeaconBlock(fmt.Sprint(endBlock))
+	if err != nil {
+		return fmt.Errorf("error fetching beacon block %d: %w", endBlock, err)
+	}
+	if !found {
+		return fmt.Errorf("target epoch block %d ended in missing block, best-effort failure", endBlock)
+	}
+	if beaconBlock.ExecutionBlockNumber == 0 {
+		return fmt.Errorf("target epoch block %d doesn't have an execution block. pre-merge?", endBlock)
+	}
+
+	details.endTime = time.Unix(int64(endTime), 0)
+	details.snapshotBeaconBlock = endBlock
+	details.snapshotElBlockHeader, err = g.rp.Client.HeaderByNumber(context.Background(), big.NewInt(0).SetUint64(beaconBlock.ExecutionBlockNumber))
+	if err != nil {
+		return fmt.Errorf("error fetching targetEpoch %d's EL block header for el block %d: %w", targetEpoch, beaconBlock.ExecutionBlockNumber, err)
+	}
+
+	return nil
+}
+
+// Generates a preview / dry run of the tree for the current interval, using the latest finalized state as the endpoint, or targetEpoch if provided.
+func (g *treeGenerator) generatePartialTree(targetEpoch uint64) error {
+	var rewardsEvent *rewards.RewardsEvent = nil
+
+	if targetEpoch > 0 {
+		// Get beacon config
+		beaconConfig, err := g.bn.GetEth2Config()
+		if err != nil {
+			return fmt.Errorf("error getting Beacon Config: %w", err)
+		}
+		targetBlock := targetEpoch*beaconConfig.SlotsPerEpoch + beaconConfig.SlotsPerEpoch - 1
+		rewardsEvent = &rewards.RewardsEvent{ConsensusBlock: big.NewInt(0).SetUint64(targetBlock)}
+
+		g.log.Printlnf("Overriding the targeted slot to %d", targetBlock)
+	}
+
+	state, err := g.getState(rewardsEvent)
 	if err != nil {
 		return err
 	}
@@ -242,6 +291,14 @@ func (g *treeGenerator) generateCurrentTree() error {
 	details, err := g.getSnapshotDetails(nil)
 	if err != nil {
 		return fmt.Errorf("error getting snapshot details: %w", err)
+	}
+
+	if targetEpoch > 0 {
+		// Override snapshot details with targetEpoch
+		if err := g.overrideSnapshotDetails(&details, state, targetEpoch); err != nil {
+			return fmt.Errorf("error overriding target epoch %d: %w", targetEpoch, err)
+		}
+
 	}
 
 	g.log.Printlnf("Generating a dry-run tree for the current interval (%d)", details.index)
@@ -321,8 +378,60 @@ func (g *treeGenerator) approximateCurrentRethSpRewards() error {
 	return nil
 }
 
+func (g *treeGenerator) overrideRewardsEvent(rewardsEvent *rewards.RewardsEvent, targetEpoch uint64) error {
+	// Get the genesis info
+	beaconConfig, err := g.bn.GetEth2Config()
+	if err != nil {
+		return fmt.Errorf("error getting beacon config: %w", err)
+	}
+	genesisTime := beaconConfig.GenesisTime
+	genesisEpoch := beaconConfig.GenesisEpoch
+	slotsPerEpoch := beaconConfig.SlotsPerEpoch
+	secondsPerSlot := beaconConfig.SecondsPerSlot
+	secondsPerEpoch := beaconConfig.SecondsPerEpoch
+
+	endEpoch := rewardsEvent.ConsensusBlock.Uint64() / slotsPerEpoch
+
+	// Clear the rewardsEvent, keeping a few fields we like
+	*rewardsEvent = rewards.RewardsEvent{
+		Index:             rewardsEvent.Index,
+		IntervalsPassed:   rewardsEvent.IntervalsPassed,
+		IntervalStartTime: rewardsEvent.IntervalStartTime,
+	}
+
+	// targetEpoch must fall between start epoch and end epoch
+	startEpoch := ((uint64(rewardsEvent.IntervalStartTime.Unix()) - genesisTime) / secondsPerEpoch) + genesisEpoch
+	if targetEpoch < startEpoch || targetEpoch > endEpoch {
+		return fmt.Errorf("target epoch %d not in interval range %d - %d", targetEpoch, startEpoch, endEpoch)
+	}
+
+	if targetEpoch == endEpoch {
+		// Just generate the full interval, since the requested endEpoch is the interval end
+		return nil
+	}
+
+	// Rewrite rewardsEvent with the new end time
+	endBlock := targetEpoch*slotsPerEpoch + slotsPerEpoch - 1
+	rewardsEvent.ConsensusBlock = big.NewInt(0).SetUint64(endBlock)
+	beaconBlock, found, err := g.bn.GetBeaconBlock(fmt.Sprint(endBlock))
+	if err != nil {
+		return fmt.Errorf("error querying bn for block %d: %w", endBlock, err)
+	}
+	if !found {
+		return fmt.Errorf("target epoch block %d ended in missing block, best-effort failure", endBlock)
+	}
+	if beaconBlock.ExecutionBlockNumber == 0 {
+		return fmt.Errorf("target epoch block %d doesn't have an execution block. pre-merge?", endBlock)
+	}
+	rewardsEvent.ExecutionBlock = big.NewInt(0).SetUint64(beaconBlock.ExecutionBlockNumber)
+	endTime := (endBlock-(genesisEpoch*slotsPerEpoch))*secondsPerSlot + genesisTime
+	rewardsEvent.IntervalEndTime = time.Unix(int64(endTime), 0)
+
+	return nil
+}
+
 // Recreates an existing tree for a past interval
-func (g *treeGenerator) generatePastTree(index uint64) error {
+func (g *treeGenerator) generatePastTree(index uint64, targetEpoch uint64) error {
 
 	// Find the event for this interval
 	rewardsEvent, err := rprewards.GetRewardSnapshotEvent(g.rp, g.cfg, index)
@@ -330,6 +439,14 @@ func (g *treeGenerator) generatePastTree(index uint64) error {
 		return fmt.Errorf("error getting rewards submission event for interval %d: %w", index, err)
 	}
 	g.log.Printlnf("Found rewards submission event: Beacon block %s, execution block %s", rewardsEvent.ConsensusBlock.String(), rewardsEvent.ExecutionBlock.String())
+
+	// Apply overrides from targetEpoch, if set
+	if targetEpoch > 0 {
+		g.log.Printlnf("Overriding the target epoch to %d", targetEpoch)
+		if err := g.overrideRewardsEvent(&rewardsEvent, targetEpoch); err != nil {
+			return fmt.Errorf("error override past interval %d with target epoch %d: %w", index, targetEpoch, err)
+		}
+	}
 
 	state, err := g.getState(&rewardsEvent)
 	if err != nil {
@@ -358,11 +475,13 @@ func (g *treeGenerator) generatePastTree(index uint64) error {
 	g.log.Printlnf("Finished in %s", time.Since(start).String())
 
 	// Validate the Merkle root
-	root := common.BytesToHash(rewardsFile.MerkleTree.Root())
-	if root != rewardsEvent.MerkleRoot {
-		g.log.Printlnf("WARNING: your Merkle tree had a root of %s, but the canonical Merkle tree's root was %s. This file will not be usable for claiming rewards.", root.Hex(), rewardsEvent.MerkleRoot.Hex())
-	} else {
-		g.log.Printlnf("Your Merkle tree's root of %s matches the canonical root! You will be able to use this file for claiming rewards.", rewardsFile.MerkleRoot)
+	if targetEpoch == 0 {
+		root := common.BytesToHash(rewardsFile.MerkleTree.Root())
+		if root != rewardsEvent.MerkleRoot {
+			g.log.Printlnf("WARNING: your Merkle tree had a root of %s, but the canonical Merkle tree's root was %s. This file will not be usable for claiming rewards.", root.Hex(), rewardsEvent.MerkleRoot.Hex())
+		} else {
+			g.log.Printlnf("Your Merkle tree's root of %s matches the canonical root! You will be able to use this file for claiming rewards.", rewardsFile.MerkleRoot)
+		}
 	}
 
 	err = g.writeFiles(rewardsFile, index)
