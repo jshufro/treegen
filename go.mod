@@ -2,10 +2,12 @@ module treegen
 
 go 1.19
 
+replace github.com/rocket-pool/smartnode v1.9.0-rc1.0.20230317054040-ae91ef90ba5f => ../smartnode
+
 require (
 	github.com/ethereum/go-ethereum v1.10.26
 	github.com/fatih/color v1.14.1
-	github.com/rocket-pool/rocketpool-go v1.10.1-0.20230228020137-d5a680907dff
+	github.com/rocket-pool/rocketpool-go v1.10.1-0.20230322010340-62d9893c1744
 	github.com/rocket-pool/smartnode v1.9.0-rc1.0.20230317054040-ae91ef90ba5f
 	github.com/urfave/cli/v2 v2.23.0
 )
@@ -19,6 +21,7 @@ require (
 	github.com/ferranbt/fastssz v0.1.3 // indirect
 	github.com/go-ole/go-ole v1.2.6 // indirect
 	github.com/go-stack/stack v1.8.1 // indirect
+	github.com/goccy/go-json v0.10.2 // indirect
 	github.com/google/uuid v1.3.0 // indirect
 	github.com/gorilla/websocket v1.5.0 // indirect
 	github.com/hashicorp/go-version v1.6.0 // indirect
@@ -43,11 +46,13 @@ require (
 	github.com/russross/blackfriday/v2 v2.1.0 // indirect
 	github.com/shirou/gopsutil v3.21.11+incompatible // indirect
 	github.com/sirupsen/logrus v1.8.1 // indirect
-	github.com/supranational/blst v0.3.8-0.20220526154634-513d2456b344 // indirect
+	github.com/supranational/blst v0.3.10 // indirect
 	github.com/thomaso-mirodin/intmath v0.0.0-20160323211736-5dc6d854e46e // indirect
 	github.com/tklauser/go-sysconf v0.3.11 // indirect
 	github.com/tklauser/numcpus v0.6.0 // indirect
+	github.com/umbracle/go-eth-consensus v0.1.2 // indirect
 	github.com/urfave/cli v1.22.12 // indirect
+	github.com/valyala/fastjson v1.6.4 // indirect
 	github.com/wealdtech/go-eth2-types/v2 v2.8.1-0.20230131115251-b93cf60cee26 // indirect
 	github.com/wealdtech/go-merkletree v1.0.1-0.20190605192610-2bb163c2ea2a // indirect
 	github.com/xrash/smetrics v0.0.0-20201216005158-039620a65673 // indirect
