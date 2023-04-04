@@ -42,10 +42,11 @@ type snapshotDetails struct {
 }
 
 type treeGenerator struct {
-	log *log.ColorLogger
-	rp  *rocketpool.RocketPool
-	cfg *config.RocketPoolConfig
-	bn  beacon.Client
+	log          *log.ColorLogger
+	rp           *rocketpool.RocketPool
+	cfg          *config.RocketPoolConfig
+	bn           beacon.Client
+	beaconConfig beacon.Eth2Config
 
 	outputDir   string
 	prettyPrint bool
@@ -78,6 +79,10 @@ func GenerateTree(c *cli.Context) error {
 		return fmt.Errorf("error connecting to the EC: %w", err)
 	}
 	bn := client.NewStandardHttpClient(bnUrl)
+	beaconConfig, err := bn.GetEth2Config()
+	if err != nil {
+		return fmt.Errorf("error getting beacon config from the bn at %s - %w", bnUrl, err)
+	}
 
 	// Check which network we're on via the BN
 	depositContract, err := bn.GetEth2DepositContract()
@@ -113,13 +118,14 @@ func GenerateTree(c *cli.Context) error {
 
 	// Create the generator
 	generator := treeGenerator{
-		log:         &log,
-		rp:          rp,
-		cfg:         cfg,
-		bn:          bn,
-		outputDir:   c.String("output-dir"),
-		prettyPrint: c.Bool("pretty-print"),
-		ruleset:     c.Uint64("ruleset"),
+		log:          &log,
+		rp:           rp,
+		cfg:          cfg,
+		bn:           bn,
+		beaconConfig: beaconConfig,
+		outputDir:    c.String("output-dir"),
+		prettyPrint:  c.Bool("pretty-print"),
+		ruleset:      c.Uint64("ruleset"),
 	}
 
 	// Print the network info and exit if requested
@@ -132,11 +138,38 @@ func GenerateTree(c *cli.Context) error {
 		return generator.approximateCurrentRethSpRewards()
 	}
 
-	if currentIndex < 0 {
-		return generator.generatePartialTree(targetEpoch)
+	var targetBlock uint64
+	if targetEpoch > 0 {
+		targetBlock, err = generator.lastBlockInEpoch(targetEpoch)
+		if err != nil {
+			return err
+		}
 	}
 
-	return generator.generatePastTree(uint64(currentIndex), targetEpoch)
+	if currentIndex < 0 {
+		return generator.generatePartialTree(targetBlock)
+	}
+
+	return generator.generatePastTree(uint64(currentIndex), targetBlock)
+}
+
+func (g *treeGenerator) lastBlockInEpoch(epoch uint64) (uint64, error) {
+	end := epoch * g.beaconConfig.SlotsPerEpoch
+	start := end + g.beaconConfig.SlotsPerEpoch - 1
+	for block := start; block >= end; block-- {
+		_, exists, err := g.bn.GetBeaconBlock(fmt.Sprint(block))
+		if err != nil {
+			return 0, err
+		}
+
+		if exists {
+			return block, nil
+		}
+
+		g.log.Printlnf("No proposal in epoch %d at slot %d...", epoch, block-end)
+	}
+
+	return 0, fmt.Errorf("Epoch %d appears to have had no blocks proposed, or all are missing from the bn", epoch)
 }
 
 func (g *treeGenerator) generateRewardsFile(treegen *rprewards.TreeGenerator) (*rprewards.RewardsFile, error) {
@@ -233,15 +266,15 @@ func (g *treeGenerator) writeFiles(rewardsFile *rprewards.RewardsFile, index uin
 	return nil
 }
 
-func (g *treeGenerator) overrideSnapshotDetails(details *snapshotDetails, state *state.NetworkState, targetEpoch uint64) error {
+func (g *treeGenerator) overrideSnapshotDetails(details *snapshotDetails, state *state.NetworkState, endBlock uint64) error {
 	// Get the genesis info
 	genesisTime := state.BeaconConfig.GenesisTime
 	genesisEpoch := state.BeaconConfig.GenesisEpoch
 	slotsPerEpoch := state.BeaconConfig.SlotsPerEpoch
 	secondsPerSlot := state.BeaconConfig.SecondsPerSlot
 
-	endBlock := targetEpoch*slotsPerEpoch + slotsPerEpoch - 1
 	endTime := (endBlock-(genesisEpoch*slotsPerEpoch))*secondsPerSlot + genesisTime
+	targetEpoch := endBlock / slotsPerEpoch
 
 	if endTime <= uint64(details.startTime.Unix()) {
 		return fmt.Errorf("targetEpoch %d before current interval %d", targetEpoch, details.index)
@@ -252,7 +285,7 @@ func (g *treeGenerator) overrideSnapshotDetails(details *snapshotDetails, state 
 		return fmt.Errorf("error fetching beacon block %d: %w", endBlock, err)
 	}
 	if !found {
-		return fmt.Errorf("target epoch block %d ended in missing block, best-effort failure", endBlock)
+		panic("Should not be missing the endBlock after it was already found once")
 	}
 	if beaconBlock.ExecutionBlockNumber == 0 {
 		return fmt.Errorf("target epoch block %d doesn't have an execution block. pre-merge?", endBlock)
@@ -269,16 +302,15 @@ func (g *treeGenerator) overrideSnapshotDetails(details *snapshotDetails, state 
 }
 
 // Generates a preview / dry run of the tree for the current interval, using the latest finalized state as the endpoint, or targetEpoch if provided.
-func (g *treeGenerator) generatePartialTree(targetEpoch uint64) error {
+func (g *treeGenerator) generatePartialTree(targetBlock uint64) error {
 	var rewardsEvent *rewards.RewardsEvent = nil
+	var err error
 
-	if targetEpoch > 0 {
+	if targetBlock > 0 {
 		// Get beacon config
-		beaconConfig, err := g.bn.GetEth2Config()
 		if err != nil {
 			return fmt.Errorf("error getting Beacon Config: %w", err)
 		}
-		targetBlock := targetEpoch*beaconConfig.SlotsPerEpoch + beaconConfig.SlotsPerEpoch - 1
 		rewardsEvent = &rewards.RewardsEvent{ConsensusBlock: big.NewInt(0).SetUint64(targetBlock)}
 
 		g.log.Printlnf("Overriding the targeted slot to %d", targetBlock)
@@ -294,9 +326,10 @@ func (g *treeGenerator) generatePartialTree(targetEpoch uint64) error {
 		return fmt.Errorf("error getting snapshot details: %w", err)
 	}
 
-	if targetEpoch > 0 {
+	if targetBlock > 0 {
+		targetEpoch := targetBlock / g.beaconConfig.SlotsPerEpoch
 		// Override snapshot details with targetEpoch
-		if err := g.overrideSnapshotDetails(&details, state, targetEpoch); err != nil {
+		if err := g.overrideSnapshotDetails(&details, state, targetBlock); err != nil {
 			return fmt.Errorf("error overriding target epoch %d: %w", targetEpoch, err)
 		}
 
@@ -379,19 +412,16 @@ func (g *treeGenerator) approximateCurrentRethSpRewards() error {
 	return nil
 }
 
-func (g *treeGenerator) overrideRewardsEvent(rewardsEvent *rewards.RewardsEvent, targetEpoch uint64) error {
+func (g *treeGenerator) overrideRewardsEvent(rewardsEvent *rewards.RewardsEvent, targetBlock uint64) error {
 	// Get the genesis info
-	beaconConfig, err := g.bn.GetEth2Config()
-	if err != nil {
-		return fmt.Errorf("error getting beacon config: %w", err)
-	}
-	genesisTime := beaconConfig.GenesisTime
-	genesisEpoch := beaconConfig.GenesisEpoch
-	slotsPerEpoch := beaconConfig.SlotsPerEpoch
-	secondsPerSlot := beaconConfig.SecondsPerSlot
-	secondsPerEpoch := beaconConfig.SecondsPerEpoch
+	genesisTime := g.beaconConfig.GenesisTime
+	genesisEpoch := g.beaconConfig.GenesisEpoch
+	slotsPerEpoch := g.beaconConfig.SlotsPerEpoch
+	secondsPerSlot := g.beaconConfig.SecondsPerSlot
+	secondsPerEpoch := g.beaconConfig.SecondsPerEpoch
 
 	endEpoch := rewardsEvent.ConsensusBlock.Uint64() / slotsPerEpoch
+	targetEpoch := targetBlock / slotsPerEpoch
 
 	// Clear the rewardsEvent, keeping a few fields we like
 	*rewardsEvent = rewards.RewardsEvent{
@@ -412,27 +442,27 @@ func (g *treeGenerator) overrideRewardsEvent(rewardsEvent *rewards.RewardsEvent,
 	}
 
 	// Rewrite rewardsEvent with the new end time
-	endBlock := targetEpoch*slotsPerEpoch + slotsPerEpoch - 1
-	rewardsEvent.ConsensusBlock = big.NewInt(0).SetUint64(endBlock)
-	beaconBlock, found, err := g.bn.GetBeaconBlock(fmt.Sprint(endBlock))
+	rewardsEvent.ConsensusBlock = big.NewInt(0).SetUint64(targetBlock)
+	beaconBlock, found, err := g.bn.GetBeaconBlock(fmt.Sprint(targetBlock))
 	if err != nil {
-		return fmt.Errorf("error querying bn for block %d: %w", endBlock, err)
+		return fmt.Errorf("error querying bn for block %d: %w", targetBlock, err)
 	}
 	if !found {
-		return fmt.Errorf("target epoch block %d ended in missing block, best-effort failure", endBlock)
+		panic("Should not be missing the targetBlock after it was already found once")
 	}
 	if beaconBlock.ExecutionBlockNumber == 0 {
-		return fmt.Errorf("target epoch block %d doesn't have an execution block. pre-merge?", endBlock)
+		return fmt.Errorf("target epoch block %d doesn't have an execution block. pre-merge?", targetBlock)
 	}
 	rewardsEvent.ExecutionBlock = big.NewInt(0).SetUint64(beaconBlock.ExecutionBlockNumber)
-	endTime := (endBlock-(genesisEpoch*slotsPerEpoch))*secondsPerSlot + genesisTime
+	endTime := (targetBlock-(genesisEpoch*slotsPerEpoch))*secondsPerSlot + genesisTime
 	rewardsEvent.IntervalEndTime = time.Unix(int64(endTime), 0)
 
 	return nil
 }
 
 // Recreates an existing tree for a past interval
-func (g *treeGenerator) generatePastTree(index uint64, targetEpoch uint64) error {
+func (g *treeGenerator) generatePastTree(index uint64, targetBlock uint64) error {
+	targetEpoch := targetBlock / g.beaconConfig.SlotsPerEpoch
 
 	// Find the event for this interval
 	rewardsEvent, err := rprewards.GetRewardSnapshotEvent(g.rp, g.cfg, index)
@@ -444,7 +474,7 @@ func (g *treeGenerator) generatePastTree(index uint64, targetEpoch uint64) error
 	// Apply overrides from targetEpoch, if set
 	if targetEpoch > 0 {
 		g.log.Printlnf("Overriding the target epoch to %d", targetEpoch)
-		if err := g.overrideRewardsEvent(&rewardsEvent, targetEpoch); err != nil {
+		if err := g.overrideRewardsEvent(&rewardsEvent, targetBlock); err != nil {
 			return fmt.Errorf("error override past interval %d with target epoch %d: %w", index, targetEpoch, err)
 		}
 	}
