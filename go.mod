@@ -52,7 +52,6 @@ require (
 	github.com/tklauser/numcpus v0.6.0 // indirect
 	github.com/umbracle/go-eth-consensus v0.1.2 // indirect
 	github.com/urfave/cli v1.22.12 // indirect
-	github.com/valyala/fastjson v1.6.4 // indirect
 	github.com/wealdtech/go-eth2-types/v2 v2.8.1-0.20230131115251-b93cf60cee26 // indirect
 	github.com/wealdtech/go-merkletree v1.0.1-0.20190605192610-2bb163c2ea2a // indirect
 	github.com/xrash/smetrics v0.0.0-20201216005158-039620a65673 // indirect
@@ -61,6 +60,7 @@ require (
 	golang.org/x/sync v0.1.0 // indirect
 	golang.org/x/sys v0.5.0 // indirect
 	gonum.org/v1/gonum v0.12.0 // indirect
+	google.golang.org/protobuf v1.28.1 // indirect
 	gopkg.in/natefinch/npipe.v2 v2.0.0-20160621034901-c1b8fa8bdcce // indirect
 	gopkg.in/yaml.v2 v2.4.0 // indirect
 )
