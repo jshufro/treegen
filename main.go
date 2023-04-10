@@ -95,6 +95,10 @@ func main() {
 			Aliases: []string{"m"},
 			Usage:   "Path to which to save a pprof heap profile, e.g. ./treegen.pprof. If unset, profiling is disabled.",
 		},
+		&cli.BoolFlag{
+			Name:  "validator-stats",
+			Usage: "Prints out stats for all RP validators. Compatible with -t",
+		},
 	}
 
 	app.Action = func(c *cli.Context) error {

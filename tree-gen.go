@@ -146,6 +146,10 @@ func GenerateTree(c *cli.Context) error {
 		}
 	}
 
+	if c.Bool("validator-stats") {
+		return generator.validatorStats(targetEpoch)
+	}
+
 	if currentIndex < 0 {
 		return generator.generatePartialTree(targetBlock)
 	}
@@ -262,6 +266,75 @@ func (g *treeGenerator) writeFiles(rewardsFile *rprewards.RewardsFile, index uin
 
 	g.log.Printlnf("Saved rewards snapshot file to %s", rewardsTreePath)
 	g.log.Printlnf("Successfully generated rewards snapshot for interval %d.\n", index)
+
+	return nil
+}
+
+// Prints handy stats about RP validators for a given epoch
+func (g *treeGenerator) validatorStats(targetEpoch uint64) error {
+	var rewardsEvent *rewards.RewardsEvent = nil
+
+	targetBlock := targetEpoch * g.beaconConfig.SlotsPerEpoch
+
+	if targetBlock > 0 {
+		rewardsEvent = &rewards.RewardsEvent{ConsensusBlock: big.NewInt(0).SetUint64(targetBlock)}
+	}
+
+	state, err := g.getState(rewardsEvent)
+	if err != nil {
+		return err
+	}
+
+	validatorDetails := state.ValidatorDetails
+
+	// Accumulators
+	vStates := make(map[beacon.ValidatorState]*uint64)
+	slashed := 0
+
+	// Avgs
+	tBalance := big.NewInt(0)
+	nBalance := big.NewInt(0)
+
+	for _, v := range validatorDetails {
+		var acc *uint64
+
+		nBalance = nBalance.Add(nBalance, big.NewInt(1))
+		tBalance = tBalance.Add(tBalance, big.NewInt(0).SetUint64(v.Balance))
+
+		if v.Slashed {
+			slashed += 1
+		}
+
+		status := v.Status
+		if status == "" {
+			continue
+		}
+
+		if status == "exited_slashed" {
+			g.log.Printlnf("index of slashee %d", v.Index)
+		}
+
+		acc, ok := vStates[status]
+		if !ok {
+			acc = new(uint64)
+			vStates[status] = acc
+		}
+		*acc = *acc + 1
+	}
+
+	avgBalance := big.NewFloat(0).Quo(
+		big.NewFloat(0).SetInt(tBalance),
+		big.NewFloat(0).SetInt(nBalance),
+	)
+	avgBalance = avgBalance.Quo(avgBalance, big.NewFloat(1e9))
+	avgBalanceF, _ := avgBalance.Float64()
+	// Print summary
+	g.log.Printlnf("Summary for %d validators at slot %d", nBalance.Uint64(), state.BeaconSlotNumber)
+	g.log.Printlnf("avg_balance\t\t%f", avgBalanceF)
+	g.log.Printlnf("total_slashed\t\t%d", slashed)
+	for k, v := range vStates {
+		g.log.Printlnf("%s\t\t%d", string(k), *v)
+	}
 
 	return nil
 }
