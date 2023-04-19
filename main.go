@@ -2,6 +2,9 @@ package main
 
 import (
 	"fmt"
+	"log"
+	"net/http"
+	_ "net/http/pprof"
 	"os"
 	"runtime"
 	"runtime/pprof"
@@ -99,6 +102,10 @@ func main() {
 			Name:  "validator-stats",
 			Usage: "Prints out stats for all RP validators. Compatible with -t",
 		},
+		&cli.Uint64Flag{
+			Name:  "pprof-port",
+			Usage: "Enabled a pprof server on a given port",
+		},
 	}
 
 	app.Action = func(c *cli.Context) error {
@@ -115,6 +122,18 @@ func main() {
 				os.Exit(1)
 			}
 			defer pprof.StopCPUProfile()
+		}
+
+		pprofPort := c.Uint64("pprof-port")
+		if pprofPort != 0 {
+			runtime.SetBlockProfileRate(1)
+			go func() {
+				server := &http.Server{
+					Addr: ":6891",
+				}
+				log.Println(http.ListenAndServe(fmt.Sprint("localhost:", pprofPort), nil))
+				server.ListenAndServe()
+			}()
 		}
 
 		memprofile := c.String("memprofile")

@@ -688,11 +688,7 @@ func (g *treeGenerator) getSnapshotDetails(opts *bind.CallOpts) (snapshotDetails
 	blockTime := time.Unix(int64(blockHeader.Time), 0)
 	timeSinceStart := blockTime.Sub(startTime)
 	intervalsPassed := timeSinceStart / intervalTime
-	//endTime := time.Now()
-	endTime, err := time.Parse(time.RFC3339Nano, "2023-04-06T04:00:48.460029857Z")
-	if err != nil {
-		panic(err)
-	}
+	endTime := time.Now()
 
 	// Get the latest finalized Beacon block
 	snapshotBeaconBlock, elBlockNumber, beaconBlockTime, err := getFinalizedSlot(*g.log, g.bn, nil)
